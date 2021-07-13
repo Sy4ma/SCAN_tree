@@ -1,0 +1,4 @@
+
+python train.py --data_path data_coco/ --data_name coco_precomp --vocab_path vocab/ --logger_name runs/coco_scan/log --model_name runs/coco_scan/model --max_violation --bi_gru --agg_func=Mean --cross_attn=t2i --lambda_softmax=9 --num_epochs=20 --lr_update=10 --learning_rate=.0005
+
+python evaluation_tv.py runs/coco_scan_all_phrases/model/model_best.pth.tar data_tv/npyfile_precomp/ data_tv/trees_topics_2020_641-660.txt runs_tv/all_phrases/
