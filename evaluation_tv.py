@@ -15,7 +15,7 @@ import DebugFunction as df
 
 
 # Slightly customised version of shard_xattn_t2i in evaluation.py
-def shard_xattn_t2i_tv(images, captions, caplens, opt, shard_size=512):
+def shard_xattn_t2i_tv(images, captions, caplens, st_nodes, end_nodes, opt, shard_size=512):
     """
     Computer pairwise t2i image-caption distance with locality sharding
     """
@@ -37,7 +37,7 @@ def shard_xattn_t2i_tv(images, captions, caplens, opt, shard_size=512):
                 im = images[im_start:im_end]
                 s = captions[cap_start:cap_end]
                 l = caplens[cap_start:cap_end]
-                sim = xattn_score_t2i(im, s, l, opt)
+                sim = xattn_score_t2i(im, s, l, st_nodes[cap_start:cap_end], end_nodes[cap_start:cap_end], opt)
                 d[im_start:im_end, cap_start:cap_end] = sim.data.cpu().numpy()
             # df.set_trace()
 
@@ -59,11 +59,13 @@ def make_topic_batch(topic_tree_path, vocab):
     topic_graphs = []
     # topic_graphs_node_nums = []
     topic_graphs_node_labs = []
+    topic_graphs_start_nodes = []
+    topic_graphs_end_nodes = []
     for i, topic_tree in enumerate(topic_trees):
 
         # It is OK to feed an empty string as tokens of prepare_tree_graph
         start_nodes, end_nodes, node_feats, node_labels, _ = tree_manager.prepare_tree_graph(topic_tree, [""], i)
-        
+        #df.set_trace() 
         # Nodes whose features are -1 are masked by 0, and
         # the other nodes are assocaited with 1 indicating they are used.
         node_masks = (node_feats != -1).astype(np.float32)
@@ -81,9 +83,11 @@ def make_topic_batch(topic_tree_path, vocab):
         topic_graphs.append(topic_graph)
         # topic_graphs_node_nums.append(topic_graph.num_nodes())
         topic_graphs_node_labs.append(node_labels)
-    # df.set_trace()
+        topic_graphs_start_nodes.append(start_nodes)
+        topic_graphs_end_nodes.append(end_nodes)
+    #df.set_trace()
     
-    return dgl.batch(topic_graphs), topic_graphs_node_labs
+    return dgl.batch(topic_graphs), topic_graphs_node_labs, topic_graphs_start_nodes, topic_graphs_end_nodes
     
 
 def main(model_cp_path, shot_npy_dir, topic_tree_path, output_dir):
@@ -108,7 +112,7 @@ def main(model_cp_path, shot_npy_dir, topic_tree_path, output_dir):
     model.load_state_dict(checkpoint['model'])
        
     # Make a batch collecting all the topics' trees 
-    topic_graphs, topic_graphs_node_labs = make_topic_batch(topic_tree_path, vocab)
+    topic_graphs, topic_graphs_node_labs, topic_start_nodes, topic_end_nodes = make_topic_batch(topic_tree_path, vocab)
     # Compute embeddings of nodes in each of topic trees
     topic_nodes_emb, topic_node_nums = model.forward_txt_emb(
         topic_graphs, topic_graphs_node_labs, True
@@ -135,7 +139,7 @@ def main(model_cp_path, shot_npy_dir, topic_tree_path, output_dir):
         shot_feats_emb = model.forward_img_emb(torch.Tensor(shot_feats), True)
         
         sims = shard_xattn_t2i_tv(
-            shot_feats_emb, topic_nodes_emb, topic_node_nums, opt
+            shot_feats_emb, topic_nodes_emb, topic_node_nums, topic_start_nodes, topic_end_nodes, opt
         )
         # df.set_trace()
         for j in range(topic_num):

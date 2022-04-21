@@ -98,21 +98,25 @@ def encode_data(model, data_loader, log_step=10, logging=print):
     img_embs = None
     cap_embs = None
     cap_lens = None
-   
+    node_nums = []
     node_nums_tmp = []
-    for i, (images, captions, node_labs, ids) in enumerate(data_loader):
+    st_nodes_all = None
+    end_nodes_all = None
+    for i, (images, captions, node_labs, st_nodes, end_nodes, ids) in enumerate(data_loader):
+        # df.set_trace()
         for c_node_labs in node_labs:
+            node_nums.append(c_node_labs.size)
             node_num = np.sum(c_node_labs >= 0)
             node_nums_tmp.append(node_num)
-    max_n_nodes = max(node_nums_tmp)
+    max_n_nodes = max(node_nums)
+    #max_n_nodes = max(node_nums_tmp) 
     
-    for i, (images, captions, node_labs, ids) in enumerate(data_loader):
+    for i, (images, captions, node_labs, st_nodes, end_nodes, ids) in enumerate(data_loader):
         # make sure val logger is used
         model.logger = val_logger
-        
         # compute the embeddings
         img_emb, cap_emb, node_nums = model.forward_emb(images, captions, node_labs, volatile=True) 
-        
+        # df.set_trace()
         if img_embs is None:
             if img_emb.dim() == 3:
                 img_embs = np.zeros((len(data_loader.dataset), img_emb.size(1), img_emb.size(2)))
@@ -120,15 +124,17 @@ def encode_data(model, data_loader, log_step=10, logging=print):
                 img_embs = np.zeros((len(data_loader.dataset), img_emb.size(1)))
             cap_embs = np.zeros((len(data_loader.dataset), max_n_nodes, cap_emb.size(2)))
             cap_lens = [0] * len(data_loader.dataset)
-        
+            st_nodes_all = [0] * len(data_loader.dataset) 
+            end_nodes_all = [0] * len(data_loader.dataset)
         # cache embeddings
         img_embs[ids] = img_emb.data.cpu().numpy().copy()
         cap_embs[ids,:max(node_nums),:] = cap_emb.data.cpu().numpy().copy()
         for j, nid in enumerate(ids):
             cap_lens[nid] = node_nums[j]
-        
+            st_nodes_all[nid] = st_nodes[j]
+            end_nodes_all[nid] = end_nodes[j]
         # measure accuracy and record loss
-        model.forward_loss(img_emb, cap_emb, node_nums)
+        model.forward_loss(img_emb, cap_emb, node_nums, st_nodes, end_nodes)
         # df.set_trace()
         
         # measure elapsed time
@@ -143,8 +149,8 @@ def encode_data(model, data_loader, log_step=10, logging=print):
                         i, len(data_loader), batch_time=batch_time,
                         e_log=str(model.logger)))
         del images, captions
-    
-    return img_embs, cap_embs, cap_lens
+    # df.set_trace()
+    return img_embs, cap_embs, cap_lens, st_nodes_all, end_nodes_all
 
 
 def evalrank(model_path, data_path=None, split='dev', fold5=False):
@@ -185,7 +191,7 @@ def evalrank(model_path, data_path=None, split='dev', fold5=False):
         img_embs = np.array([img_embs[i] for i in range(0, len(img_embs), 5)])
         start = time.time()
         if opt.cross_attn == 't2i':
-            sims = shard_xattn_t2i(img_embs, cap_embs, cap_lens, opt, shard_size=128)
+            sims = shard_xattn_t2i(img_embs, cap_embs, cap_lens, st_nodes, end_nodes, opt, shard_size=128)
         elif opt.cross_attn == 'i2t':
             sims = shard_xattn_i2t(img_embs, cap_embs, cap_lens, opt, shard_size=128)
         else:
@@ -263,7 +269,7 @@ def softmax(X, axis):
     return p
 
 
-def shard_xattn_t2i(images, captions, caplens, opt, shard_size=128):
+def shard_xattn_t2i(images, captions, caplens, st_nodes, end_nodes, opt, shard_size=128):
     """
     Computer pairwise t2i image-caption distance with locality sharding
     """
@@ -272,7 +278,7 @@ def shard_xattn_t2i(images, captions, caplens, opt, shard_size=128):
     # print(
     #     "n_im_shard: {}, n_cap_shard: {}".format(n_im_shard, n_cap_shard)
     # )
-    
+     
     d = np.zeros((len(images), len(captions)))
     for i in range(n_im_shard):
         im_start, im_end = shard_size*i, min(shard_size*(i+1), len(images))
@@ -284,7 +290,10 @@ def shard_xattn_t2i(images, captions, caplens, opt, shard_size=128):
                 im = Variable(torch.from_numpy(images[im_start:im_end])).cuda()
                 s = Variable(torch.from_numpy(captions[cap_start:cap_end])).cuda()
                 l = caplens[cap_start:cap_end]
-                sim = xattn_score_t2i(im, s, l, opt)
+                sim = xattn_score_t2i(
+                    im, s, l, st_nodes[cap_start:cap_end], end_nodes[cap_start:cap_end], opt, True
+                )
+                # df.set_trace()
                 d[im_start:im_end, cap_start:cap_end] = sim.data.cpu().numpy()
             # df.set_trace()
 
@@ -357,6 +366,7 @@ def t2i(images, captions, caplens, sims, npts=None, return_ranks=False):
     CapLens: (5N) array of caption lengths
     sims: (N, 5N) matrix of similarity im-cap
     """
+    #df.set_trace()
     npts = images.shape[0]
     ranks = np.zeros(5 * npts)
     top1 = np.zeros(5 * npts)

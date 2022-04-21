@@ -23,6 +23,7 @@ from collections import OrderedDict
 import sys
 
 from tree_lstm import TreeLSTM
+from tree_manager import TreeManager
 
 import DebugFunction as df
 
@@ -191,14 +192,13 @@ class EncoderText(nn.Module):
         return cap_emb, cap_len
 
 
-def func_attention(query, context, opt, smooth, eps=1e-8):
+def func_attention(query, context, attn_prev, opt, smooth, eps=1e-8):
     """
     query: (n_context, queryL, d)
     context: (n_context, sourceL, d)
     """
     batch_size_q, queryL = query.size(0), query.size(1)
     batch_size, sourceL = context.size(0), context.size(1)
-
     # Get attention
     # --> (batch, d, queryL)
     queryT = torch.transpose(query, 1, 2)
@@ -237,6 +237,11 @@ def func_attention(query, context, opt, smooth, eps=1e-8):
     attn = attn.view(batch_size, queryL, sourceL)
     # --> (batch, sourceL, queryL)
     attnT = torch.transpose(attn, 1, 2).contiguous()
+    # df.set_trace()
+    
+    weight_factor = 0.7
+    attnT = weight_factor * attnT + (1.0 - weight_factor) * attn_prev
+    #attnT = attnT + attn_prev
     
     # --> (batch, d, sourceL)
     contextT = torch.transpose(context, 1, 2)
@@ -246,7 +251,7 @@ def func_attention(query, context, opt, smooth, eps=1e-8):
     # df.set_trace()
     # --> (batch, queryL, d)
     weightedContext = torch.transpose(weightedContext, 1, 2)
-
+    
     return weightedContext, attnT
 
 
@@ -255,41 +260,187 @@ def cosine_similarity(x1, x2, dim=1, eps=1e-8):
     w12 = torch.sum(x1 * x2, dim)
     w1 = torch.norm(x1, 2, dim)
     w2 = torch.norm(x2, 2, dim)
+    #return (w12 / (w1 * w2).clamp(min=eps))
     return (w12 / (w1 * w2).clamp(min=eps)).squeeze()
 
+def find_leafnode(st_node, ed_node):
+    """ find leaf node"""
+    leaves = st_node.copy()
+    for element in ed_node:
+        try:
+            leaves.remove(element)
+        except ValueError:
+            pass
+    #l_poss = list(range(len(leaves)))
+    return leaves
 
-def xattn_score_t2i(images, captions, cap_lens, opt):
+def find_nextend(st_node, next_st, ed_node):
+    next_ed = []
+    for element in next_st:
+        next_ed.append(ed_node[st_node.index(element)])
+
+    return next_ed
+
+def xattn_score_t2i(images, captions, cap_lens, st_nodes, end_nodes, opt, is_shard=False):
     """
     Images: (n_image, n_regions, d) matrix of images
     Captions: (n_caption, max_n_word, d) matrix of captions
     CapLens: (n_caption) array of caption lengths
     """
+    #leaves = []
+    #for i in range(len(st_nodes)):
+    #    leaves.append(list(set(st_nodes[i]) - set(end_nodes[i])))
+
+    #st = st_nodes[0]
+    #ed = end_nodes[0]
+    #leaf = find_leafnode(st, ed)
+    #next_st = find_leafnode(st, leaf)
+    #next_ed = find_nextend(st, next_st, ed)
+    """
+    for i in range(1):
+        print("--------- {} tree node ----------".format(i))
+        st = st_nodes[i]
+        ed = end_nodes[i]
+        st_prev = st
+        ed_prev = ed
+        print("start",st)
+        print("end", ed)
+        while True:
+            leaves = find_leafnode(st_prev, ed_prev)
+            print("leaves",leaves)
+            next_st = find_leafnode(st_prev, leaves)
+            if len(next_st) == 0:
+                break
+            next_ed = find_nextend(st, next_st, ed)
+            print("Next_start", next_st)
+            print("Next_end", next_ed)
+            st_prev = next_st
+            ed_prev = next_ed
+    """
+    # df.set_trace()
     similarities = []
     n_image = images.size(0)
     n_caption = captions.size(0)
-    for i in range(n_caption):
+    #print("n_images: ",images.shape)
+    #print("n_captions: ", captions.shape)
+    for n in range(n_caption):
+        
+        zero_flag = False
+        st = st_nodes[n]
+        ed = end_nodes[n]
+        st_prev = None
+        ed_prev = None
+        n_word = cap_lens[n]
+        cap_i = captions[n, :n_word, :].unsqueeze(0).contiguous()
+        nodes = sorted(list(set(st) | set(ed)))
+        batch_size = images.shape[0]
+        areas = images.shape[1]
+        node_features = torch.zeros(batch_size, areas, len(nodes)).to("cuda")
+        weiContext_all = torch.zeros(batch_size, len(nodes), images.shape[2]).to("cuda")
+
+        children = {e: [] for e in ed}
+        for j, e in enumerate(ed):
+            if e == 0 and st[j] == 0:
+                continue
+            children[e].append(st[j])
+        # df.set_trace()
+        
+        tmp_cnt = 0
+        while True:
+            # array of ids indicating the current leaf nodes
+            leaves = find_leafnode(st, ed)  # l_poss
+            # pick up features of the current leaf nodes from cap_i -> cap_i2
+            cap_i2 = captions[n, leaves, :].unsqueeze(0).contiguous() 
+            # expand cap_i2
+            cap_i2_expand = cap_i2.repeat(n_image, 1, 1)
+            cap_i2_expand = cap_i2_expand.contiguous()
+            # df.set_trace()
+            # attn_prev2 is created from attn_prev using l_poss
+            # att_prev2 is defined as a dictionary key:curr_ed. value: list of features
+            # for curr_ed in ed:
+            #   for prev_st in st_prev:
+            #       if curr_ed == prev_st:
+            #          # check if curr_ed exists in attn_prev2
+                       # if not, create a new entry
+                       # if exist, add feature to value (list of feature
+            print("st", st)
+            print("ed", ed)
+            print("leaves: ", leaves)
+            print("children: ", children)
+            attn_prev2 = {leaf: [] for leaf in leaves}
+            for leaf in leaves:
+                if leaf not in children:
+                    continue
+                for child in children[leaf]:
+                    index = nodes.index(child)
+                    if torch.sum(node_features[:,:,index]) == 0:
+                        continue
+                    attn_prev2[leaf].append(node_features[:,:,index])
+            # create attn_prev3 with 128 x 36 x (# of entries in attn_prev2)
+            #print("-----------------------------------------------")
+            #df.set_trace()
+            #print(attn_prev2)
+            # attn_prev3.shape([128,36,# of leaves])
+            attn_prev3 = torch.zeros(batch_size, areas, len(attn_prev2)).to("cuda")
+            # check each entry of attn_prev2
+            for i, k in enumerate(attn_prev2.keys()):
+                for feature in attn_prev2[k]:
+                    #df.set_trace()
+                    attn_prev3[:,:,i] += feature
+                #df.set_trace()
+                attn_prev3[:,:,i] /= max(len(attn_prev2[k]), 1)
+            # if tmp_cnt == 1:
+            #     df.set_trace()
+            
+            # compute the average feature for the list of features of the current entry
+            weiContext, attn = func_attention(cap_i2_expand, images, attn_prev3, opt, smooth=opt.lambda_softmax)
+            # if is_shard == True:
+            #     df.set_trace()
+            weiContext = weiContext.contiguous()
+            weiContext_all[:,leaves,:] = weiContext.to(torch.float32)
+            # Shallow copy? Deep copy?
+            for i, leaf in enumerate(leaves):
+                index = nodes.index(leaf)
+                node_features[:,:,index] = attn[:,:,i]
+            next_st = find_leafnode(st, leaves)
+            next_ed = find_nextend(st, next_st, ed)
+            if len(next_st) == 0:
+                if zero_flag:
+                    break
+                next_st = [0]
+                next_ed = []
+                zero_flag = True
+            #df.set_trace()
+            st_prev = st
+            ed_prev = ed
+            st = next_st
+            ed = next_ed
+            tmp_cnt += 1
         # Get the i-th text description
-        n_word = cap_lens[i]
-        cap_i = captions[i, :n_word, :].unsqueeze(0).contiguous()
+        #n_word = cap_lens[i]
+        #cap_i = captions[i, :n_word, :].unsqueeze(0).contiguous()
         # --> (n_image, n_word, d)
-        cap_i_expand = cap_i.repeat(n_image, 1, 1)
+        #cap_i_expand = cap_i.repeat(n_image, 1, 1)
         """
             word(query): (n_image, n_word, d)
             image(context): (n_image, n_regions, d)
             weiContext: (n_image, n_word, d)
             attn: (n_image, n_region, n_word)
         """
-        weiContext, attn = func_attention(cap_i_expand, images, opt, smooth=opt.lambda_softmax)
-        cap_i_expand = cap_i_expand.contiguous()
-        weiContext = weiContext.contiguous()
+        #weiContext, attn = func_attention(cap_i_expand, images, opt, smooth=opt.lambda_softmax)
+        #cap_i_expand = cap_i_expand.contiguous()
+        #weiContext = weiContext.contiguous()
         # (n_image, n_word)
-        row_sim = cosine_similarity(cap_i_expand, weiContext, dim=2)
+        cap_i_expand = cap_i.repeat(n_image, 1, 1)
+        row_sim = cosine_similarity(cap_i_expand, weiContext_all, dim=2)
+        #df.set_trace()
         # Note if n_image == 1 and n_word == 1, it is needed to perform unsqueeze twice.
         if row_sim.dim() <= 1:
             if n_image == 1:
                 row_sim = row_sim.unsqueeze(0)
             if n_word == 1:
-                row_sim = row_sim.unsqueeze(1)
+                row_sim = row_sim.unsqueeze(1)       
+        
         if opt.agg_func == 'LogSumExp':
             row_sim.mul_(opt.lambda_lse).exp_()
             row_sim = row_sim.sum(dim=1, keepdim=True)
@@ -302,11 +453,13 @@ def xattn_score_t2i(images, captions, cap_lens, opt):
             row_sim = row_sim.mean(dim=1, keepdim=True)
         else:
             raise ValueError("unknown aggfunc: {}".format(opt.agg_func))
-        # df.set_trace()
+        
+        #df.set_trace()
         similarities.append(row_sim)
     
     # (n_image, n_caption)
     similarities = torch.cat(similarities, 1)
+    # df.set_trace()
     
     return similarities
 
@@ -349,7 +502,6 @@ def xattn_score_i2t(images, captions, cap_lens, opt):
         else:
             raise ValueError("unknown aggfunc: {}".format(opt.agg_func))
         similarities.append(row_sim)
-
     # (n_image, n_caption)
     similarities = torch.cat(similarities, 1)
     return similarities
@@ -366,14 +518,18 @@ class ContrastiveLoss(nn.Module):
         self.margin = margin
         self.max_violation = max_violation
 
-    def forward(self, im, s, s_l):
+    def forward(self, im, s, s_l, st, end):
         # compute image-sentence score matrix
+        # df.set_trace() 
         if self.opt.cross_attn == 't2i':
-            scores = xattn_score_t2i(im, s, s_l, self.opt)
+            scores = xattn_score_t2i(im, s, s_l, st, end, self.opt)
         elif self.opt.cross_attn == 'i2t':
             scores = xattn_score_i2t(im, s, s_l, self.opt)
         else:
             raise ValueError("unknown first norm type:", opt.raw_feature_norm)
+        #print("------------------------scores-------------------------")
+        #print(scores)
+        #print(torch.isnan(scores).any())
         diagonal = scores.diag().view(im.size(0), 1)
         d1 = diagonal.expand_as(scores)
         d2 = diagonal.t().expand_as(scores)
@@ -411,12 +567,13 @@ class SCAN(object):
         self.img_enc = EncoderImage(opt.data_name, opt.img_dim, opt.embed_size,
                                     precomp_enc_type=opt.precomp_enc_type,
                                     no_imgnorm=opt.no_imgnorm)
+        #df.set_trace()
         # self.txt_enc = EncoderText(opt.vocab_size, opt.word_dim,
         #                         opt.embed_size, opt.num_layers, 
         #                         use_bi_gru=opt.bi_gru,  
         #                         no_txtnorm=opt.no_txtnorm)
         self.txt_enc = TreeLSTM(opt.vocab_size, opt.word_dim, opt.embed_size)
-        
+        #df.set_trace() 
         if torch.cuda.is_available():
             self.img_enc.cuda()
             self.txt_enc.cuda()
@@ -426,15 +583,18 @@ class SCAN(object):
         self.criterion = ContrastiveLoss(opt=opt,
                                          margin=opt.margin,
                                          max_violation=opt.max_violation)
+        #df.set_trace()
         params = list(self.txt_enc.parameters())
         params += list(self.img_enc.fc.parameters())
         
         self.params = params
-        
+        print("------------------------------------------------------------------------------------")
+        print(params) 
+        print("------------------------------------------------------------------------------------")
         self.optimizer = torch.optim.Adam(params, lr=opt.learning_rate)
         
         self.Eiters = 0
-        # df.set_trace()
+        #df.set_trace()
         
     def state_dict(self):
         state_dict = [self.img_enc.state_dict(), self.txt_enc.state_dict()]
@@ -469,16 +629,21 @@ class SCAN(object):
         max_used_node_num = max(used_node_nums)
         
         if torch.cuda.is_available():
-            cap_emb2 = torch.zeros(cap_num, max_used_node_num, self.txt_enc.h_size).to("cuda")
+            cap_emb2 = torch.zeros(cap_num, max(node_nums), self.txt_enc.h_size).to("cuda")
+            #cap_emb2 = torch.zeros(cap_num, max_used_node_num, self.txt_enc.h_size).to("cuda")
         else:
-            cap_emb2 = torch.zeros(cap_num, max_used_node_num, self.txt_enc.h_size)
+            cap_emb2 = torch.zeros(cap_num, max(node_nums), self.txt_enc.h_size)
+            #cap_emb2 = torch.zeros(cap_num, max_used_node_num, self.txt_enc.h_size)
         
+        # !!! Change cap_emb2 so that it contains all node features
+        #cap_emb2 = torch.reshape(cap_emb, (cap_num, max(node_nums), self.txt_enc.h_size))
+               
         row_offset = 0
         for cid in range(cap_num):
             # print("cid:{} -> {}-{}:".format(cid, row_offset, row_offset+node_nums[cid]))
-            cap_emb_poss = np.nonzero(node_labs[cid] >= 0)[0] + row_offset
+            # cap_emb_poss = np.nonzero(node_labs[cid] >= 0)[0] + row_offset
             # print("{}th rows are copied".format(cap_emb_poss))
-            cap_emb2[cid,:used_node_nums[cid],:] = cap_emb[cap_emb_poss,:]
+            cap_emb2[cid,:node_nums[cid],:] = cap_emb[row_offset:row_offset+node_nums[cid],:]
             row_offset += node_nums[cid]
         print(
             "--- cap_emb ({}) is transformed into cap_emb2 ({})"
@@ -486,7 +651,7 @@ class SCAN(object):
         )
         # df.set_trace()
 
-        return cap_emb2, used_node_nums
+        return cap_emb2, node_nums
     
     
     def forward_emb(self, images, cap_trees, node_labs, volatile=False):
@@ -505,14 +670,13 @@ class SCAN(object):
                 h_state = torch.zeros((node_num, self.txt_enc.h_size)).to("cuda")
                 c_state = torch.zeros((node_num, self.txt_enc.h_size)).to("cuda")
                 # cap_trees = cap_trees.cuda()
-            
+                #df.set_trace() 
             # Forward
             img_emb = self.img_enc(images)
             
             # cap_emb (tensor), cap_lens (list)
             cap_emb = self.txt_enc(cap_trees, h_state, c_state)
             cap_emb2, node_nums2 = self.organise_caption_embeddings(cap_emb, node_labs)
-            # df.set_trace()
             
             return img_emb, cap_emb2, node_nums2
 
@@ -571,32 +735,46 @@ class SCAN(object):
                 return self.organise_caption_embeddings(cap_emb, node_labs)
     
     
-    def forward_loss(self, img_emb, cap_emb, cap_len, **kwargs):
+    def forward_loss(self, img_emb, cap_emb, cap_len, st_nodes, end_nodes, **kwargs):
         """Compute the loss given pairs of image and caption embeddings
         """
-        loss = self.criterion(img_emb, cap_emb, cap_len)
+        #df.set_trace()
+        loss = self.criterion(img_emb, cap_emb, cap_len,st_nodes, end_nodes)
         self.logger.update('Le', loss.data.item(), img_emb.size(0))
         return loss
     
-    def train_emb(self, images, cap_trees, node_labs, ids=None, *args):
+    def train_emb(self, images, cap_trees, node_labs, st_nodes, end_nodes, ids=None, *args):
         """One training step given images and captions.
            NOTE: cap_trees is a batch of multiple caption trees, and
                  this batch is aggregated into one graph.
         """
+        #ids = None
         self.Eiters += 1
         self.logger.update('Eit', self.Eiters)
         self.logger.update('lr', self.optimizer.param_groups[0]['lr'])
-        
+        #df.set_trace() 
         # compute the embeddings
         img_emb, cap_emb, node_nums = self.forward_emb(images, cap_trees, node_labs)
-                 
+        # df.set_trace()  
         # measure accuracy and record loss
-        self.optimizer.zero_grad()
-        loss = self.forward_loss(img_emb, cap_emb, node_nums)
-        # df.set_trace()
         
+        self.optimizer.zero_grad()
+        loss = self.forward_loss(img_emb, cap_emb, node_nums, st_nodes, end_nodes)
+        #print("--------------------------------loss-----------------------------")
+        #print(loss)
+        #print(torch.isnan(loss))
+        # df.set_trace()
         # compute gradient and do SGD step
         loss.backward()
+        
+        print("------------------------------------------------------------------") 
+        #print(self.params)
+        print("----nan----")
+        print(any(torch.isnan(i).any().item() for i in self.params))
+        print("----inf----")
+        print(any(torch.isinf(i).any().item() for i in self.params))
+        print("------------------------------------------------------------------")
+        
         if self.grad_clip > 0:
             clip_grad_norm_(self.params, self.grad_clip)
         self.optimizer.step()

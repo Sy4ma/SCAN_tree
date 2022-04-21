@@ -73,21 +73,22 @@ class PrecompDataset(data.Dataset):
         #     self.length = 5000
         # if data_split == "dev":
         #     df.set_trace()
-        
+
     def __getitem__(self, index):
-        # index = 22241 
+        # index = 0 
         # handle the image redundancy
         img_id = int(index/self.im_div)
         image = torch.Tensor(self.images[img_id])
         caption = self.captions[index]
-        vocab = self.vocab
-        
+        vocab = self.vocab 
         # Convert caption (string) to word ids.
         tokens = nltk.tokenize.word_tokenize(caption.lower())
         # print("** index = {}: {}".format(index, tokens))
         start_nodes, end_nodes, node_feats, node_labels, _ = self.tree_manager.prepare_tree_graph(self.trees[index], tokens, index)
+        #cap = self.tree_manager.get_phrase_string(self.trees[0], 0)
         # Nodes whose features are -1 are masked by 0, and
         # the other nodes are assocaited with 1 indicating they are used. 
+        # df.set_trace()
         node_masks = (node_feats != -1).astype(np.float32)
         target = dgl.graph(
             (torch.tensor(start_nodes, dtype=torch.int32), torch.tensor(end_nodes, dtype=torch.int32))
@@ -111,7 +112,8 @@ class PrecompDataset(data.Dataset):
         #     print("{}th word: {} -> {}".format(i, cid, vocab.idx2word[str(cid)]))
         # df.set_trace()
         
-        return image, target, node_labels, index, img_id
+        #return image, target, node_labels, index, img_id, start_nodes, end_nodes
+        return image, target, node_labels, start_nodes, end_nodes, index, img_id
 
     def __len__(self):
         return self.length
@@ -131,15 +133,16 @@ def collate_fn(data):
     """
     # Sort a data list by caption length
     # data.sort(key=lambda x: len(x[1]), reverse=True)
-    images, cap_trees, node_labs, ids, img_ids = zip(*data)
-    
+    #images, cap_trees, node_labs, ids, img_ids, st_nodes, end_nodes = zip(*data)
+    images, cap_trees, node_labs, st_nodes, end_nodes, ids, img_ids = zip(*data)
+    #df.set_trace()
     # Merge images (convert tuple of 3D tensor to 4D tensor)
     images = torch.stack(images, 0)
     
     # Merget captions (convert tuple of 1D tensor to 2D tensor)
     # lengths = [len(cap) for cap in captions]
     # targets = torch.zeros(len(captions), max(lengths)).long()
-    # for i, cap in enumerate(captions):
+    #  i, cap in enumerate(captions):
     #     end = lengths[i]
     #     targets[i, :end] = cap[:end]
     
@@ -149,19 +152,20 @@ def collate_fn(data):
     # lengths = [cap_tree.num_nodes() for cap_tree in cap_trees]
     # df.set_trace()
     
-    return images, targets, node_labs, ids
+    return images, targets, node_labs, st_nodes, end_nodes, ids
 
 
 def get_precomp_loader(data_path, data_split, vocab, opt, batch_size=100,
                        shuffle=True, num_workers=2):
     """Returns torch.utils.data.DataLoader for custom coco dataset."""
     dset = PrecompDataset(data_path, data_split, vocab)
-
+    #df.set_trace()
     data_loader = torch.utils.data.DataLoader(dataset=dset,
                                               batch_size=batch_size,
                                               shuffle=shuffle,
                                               pin_memory=True,
                                               collate_fn=collate_fn)
+    #df.set_trace()
     return data_loader
 
 

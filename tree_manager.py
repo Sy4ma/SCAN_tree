@@ -117,12 +117,14 @@ class TreeManager:
             
             self.curr_node += 1
             my_id = self.curr_node
+            #df.set_trace()
             if self.node_labels[my_id] >= 0:
                 self.tmp_id += 1
                 print(
                     "<{}> {}th node -> {} ::: {}"
                     .format(self.tmp_id, my_id, self.node_labels[my_id], t)
                 )
+
             # The current node (subtree) is a leaf
             if t.height() == 2:
                 return
@@ -232,6 +234,7 @@ class TreeManager:
         
         self.init(tokens, index)
         self.traverse(root, self.curr_node)
+        #df.set_trace()
         nb_nodes = self.curr_node + 1 
         # print(">> # of nodes = {}".format(nb_nodes))
         # print(">> node_labels: {}".format(self.node_labels[:nb_nodes]))
@@ -247,10 +250,9 @@ class TreeManager:
         
         # For debug
         self.curr_node = -1
-        print("##### {}th: {} #####".format(index, tokens))
-        self.traverse_for_debug(root, self.curr_node)
-        # df.set_trace()
-        
+        # print("##### {}th: {} #####".format(index, tokens))
+        # self.traverse_for_debug(root, self.curr_node)
+        #df.set_trace()
         return self.start_nodes, self.end_nodes, self.node_feats[:nb_nodes], self.node_labels[:nb_nodes], self.sentence
 
 

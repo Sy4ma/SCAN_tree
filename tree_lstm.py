@@ -48,7 +48,8 @@ class ChildSumTreeLSTMCell(nn.Module):
         self.U_iou = nn.Linear(h_size, 3 * h_size, bias=False)
         self.b_iou = nn.Parameter(th.zeros(1, 3 * h_size))
         self.U_f = nn.Linear(h_size, h_size)
-
+        #df.set_trace()
+       
     def message_func(self, edges):
         # print("message")
         return {'h': edges.src['h'], 'c': edges.src['c']}
@@ -84,6 +85,7 @@ class TreeLSTM(nn.Module):
         self.x_size = x_size
         self.h_size = h_size
         self.embedding = nn.Embedding(num_vocabs, x_size)
+        #df.set_trace()
         # if pretrained_emb is not None:
         #     print('Using glove')
         #     self.embedding.weight.data.copy_(pretrained_emb)
@@ -92,11 +94,12 @@ class TreeLSTM(nn.Module):
         # self.linear = nn.Linear(h_size, num_classes)
         # cell = TreeLSTMCell if cell_type == 'nary' else ChildSumTreeLSTMCell
         cell = ChildSumTreeLSTMCell
+        #df.set_trace()
         self.cell = cell(x_size, h_size)
         
         self.init_embedding_weights()
         self.init_cell_parameters()
-        # df.set_trace()
+        #df.set_trace()
         
         
     def init_embedding_weights(self):
@@ -138,9 +141,10 @@ class TreeLSTM(nn.Module):
         # print("h_state (before propagation): {}".format(graph.ndata["h"]))
         # propagate
         dgl.prop_nodes_topo(graph, self.cell.message_func, self.cell.reduce_func, apply_node_func=self.cell.apply_node_func)
-        # df.set_trace()
+        #df.set_trace()
         # compute logits
-        # h = self.dropout(g.ndata.pop('h'))
+        #h = self.dropout(g.ndata.pop('h'))
+        #df.set_trace()
         return graph.ndata.pop('h')
         # logits = self.linear(h)
         # return h
