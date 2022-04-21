@@ -25,7 +25,7 @@ import logging
 import tensorboard_logger as tb_logger
 
 import argparse
-
+import copy
 import DebugFunction as df
 
 def main():
@@ -51,7 +51,7 @@ def main():
                         help='Gradient clipping threshold.')
     parser.add_argument('--num_layers', default=1, type=int,
                         help='Number of GRU layers.')
-    parser.add_argument('--learning_rate', default=.0002, type=float,
+    parser.add_argument('--learning_rate', default=.0005, type=float,
                         help='Initial learning rate.')
     parser.add_argument('--lr_update', default=15, type=int,
                         help='Number of epochs to update the learning rate.')
@@ -91,7 +91,7 @@ def main():
                         help='Attention softmax temperature.')
     opt = parser.parse_args()
     print(opt)
-
+    #df.set_trace()
     logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
     tb_logger.configure(opt.logger_name, flush_secs=5)
 
@@ -100,13 +100,12 @@ def main():
     print(">> Load the vocabulary from {}".format(full_vocab_path))
     vocab = deserialize_vocab(full_vocab_path, True)
     opt.vocab_size = len(vocab)
-    
+
     # Load data loaders
     train_loader, val_loader = data.get_loaders(
         opt.data_name, vocab, opt.batch_size, opt.workers, opt)
     # for i, train_data in enumerate(train_loader):
     #     print("{}".format(i))
-    
     # Construct the model
     model = SCAN(opt)
     # df.set_trace()
@@ -126,23 +125,47 @@ def main():
             model.Eiters = checkpoint['Eiters']
             print("=> loaded checkpoint '{}' (epoch {}, best_rsum {})"
                   .format(opt.resume, start_epoch, best_rsum))
+            #df.set_trace()
             validate(opt, val_loader, model)
         else:
             print("=> no checkpoint found at '{}'".format(opt.resume))
     
     # Train the Model
     for epoch in range(start_epoch, opt.num_epochs):
+        #df.set_trace()
         print("##### {}th epoch #####".format(epoch))
         print(opt.logger_name)
         print(opt.model_name)
         
         adjust_learning_rate(opt, model.optimizer, epoch)
-        
         # train for one epoch
+        prev_model = copy.deepcopy(model)
+        prev_optimizer = copy.deepcopy(model.optimizer)
+
         train(opt, train_loader, model, epoch, val_loader)
-         
+        
+        isnan = any(torch.isnan(i).any().item() for i in model.params)
+        isinf = any(torch.isinf(i).any().item() for i in model.params)
+        if isnan or isinf :
+            model = prev_model
+            lr = model.optimizer.param_groups[0]['lr']
+            model.optimizer = torch.optim.Adam(model.params, lr=lr)
+            model.optimizer.load_state_dict(prev_optimizer.state_dict())
+        else:
+            prev_model = copy.deepcopy(model)
+            prev_optimizer = copy.deepcopy(model.optimizer)
+
         # evaluate on validation set
         rsum = validate(opt, val_loader, model)
+        if isnan or isinf :
+            model = prev_model
+            lr = model.optimizer.param_groups[0]['lr']
+            model.optimizer = torch.optim.Adam(model.params, lr=lr)
+            model.optimizer.load_state_dict(prev_optimizer.state_dict())
+        else:
+            prev_model = copy.deepcopy(model)
+            prev_optimizer = copy.deepcopy(model.optimizer)
+
         # df.set_trace()
         
         # remember best R@ sum and save checkpoint
@@ -165,21 +188,35 @@ def train(opt, train_loader, model, epoch, val_loader):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     train_logger = LogCollector()
-    
     end = time.time()
     for i, train_data in enumerate(train_loader):
-        
         # switch to train mode
         model.train_start()
-        
         # measure data loading time
         data_time.update(time.time() - end)
         
         # make sure train logger is used
         model.logger = train_logger
         
+        prev_model = copy.deepcopy(model)
+        prev_optimizer = copy.deepcopy(model.optimizer)
+
         # Update the model
         model.train_emb(*train_data)
+        # df.set_trace()
+        
+        
+        isnan = any(torch.isnan(i).any().item() for i in model.params)
+        isinf = any(torch.isinf(i).any().item() for i in model.params)
+        if isnan or isinf :
+            model = prev_model
+            lr = model.optimizer.param_groups[0]['lr']
+            model.optimizer = torch.optim.Adam(model.params, lr=lr)
+            model.optimizer.load_state_dict(prev_optimizer.state_dict())
+        else:
+            prev_model = copy.deepcopy(model)
+            prev_optimizer = copy.deepcopy(model.optimizer)
+        
         
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -204,20 +241,41 @@ def train(opt, train_loader, model, epoch, val_loader):
         tb_logger.log_value('batch_time', batch_time.val, step=model.Eiters)
         tb_logger.log_value('data_time', data_time.val, step=model.Eiters)
         model.logger.tb_log(tb_logger, step=model.Eiters)
-        
+        best_rsum = 0 
         # validate at every val_step
         if model.Eiters % opt.val_step == 0:
-            validate(opt, val_loader, model)
-        
+            #df.set_trace()
+            rsum = validate(opt, val_loader, model)
+            is_best = rsum > best_rsum
+            best_rsum = max(rsum, best_rsum)
+            if not os.path.exists(opt.model_name):
+                os.mkdir(opt.model_name)
+            save_checkpoint({
+                'epoch': epoch,
+                'model': model.state_dict(),
+                'best_rsum': best_rsum,
+                'opt': opt,
+                'Eiters': model.Eiters,
+            }, is_best, filename='train_check_{}.pth.tar'.format(epoch), prefix=opt.model_name + '/')
+            if isnan or isinf :
+                model = prev_model
+                lr = model.optimizer.param_groups[0]['lr']
+                model.optimizer = torch.optim.Adam(model.params, lr=lr)
+                model.optimizer.load_state_dict(prev_optimizer.state_dict())
+            else:
+                prev_model = copy.deepcopy(model)
+                prev_optimizer = copy.deepcopy(model.optimizer)
+ 
 
 def validate(opt, val_loader, model):
     # compute the encoding for all the validation images and captions
-    img_embs, cap_embs, cap_lens = encode_data(
+    img_embs, cap_embs, cap_lens, st_nodes, end_nodes = encode_data(
         model, val_loader, opt.log_step, logging.info)
     img_embs = numpy.array([img_embs[i] for i in range(0, len(img_embs), 5)])
     start = time.time()
+    # df.set_trace()
     if opt.cross_attn == 't2i':
-        sims = shard_xattn_t2i(img_embs, cap_embs, cap_lens, opt, shard_size=128)
+        sims = shard_xattn_t2i(img_embs, cap_embs, cap_lens, st_nodes, end_nodes, opt, shard_size=128)
     elif opt.cross_attn == 'i2t':
         sims = shard_xattn_i2t(img_embs, cap_embs, cap_lens, opt, shard_size=128)
     else:
@@ -232,7 +290,7 @@ def validate(opt, val_loader, model):
                  (r1, r5, r10, medr, meanr))
     # image retrieval
     (r1i, r5i, r10i, medri, meanr) = t2i(
-        img_embs, cap_embs, cap_lens, sims)
+            img_embs, cap_embs, cap_lens, sims)
     logging.info("Text to image: %.1f, %.1f, %.1f, %.1f, %.1f" %
                  (r1i, r5i, r10i, medri, meanr))
     # sum of recalls to be used for early stopping
